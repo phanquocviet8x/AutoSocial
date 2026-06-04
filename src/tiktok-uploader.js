@@ -953,6 +953,45 @@ function isLikelyPublishApiResponse(response) {
   return urlPatterns.some((pattern) => url.includes(pattern));
 }
 
+function createPublishResponseTracker(page) {
+  let publishApiSuccess = false;
+  let publishApiFailure = null;
+
+  const responseHandler = (response) => {
+    if (!isLikelyPublishApiResponse(response)) {
+      return;
+    }
+
+    const status = response.status();
+    const url = response.url();
+
+    if (status >= 200 && status < 300) {
+      publishApiSuccess = true;
+      console.log(`Publish API success: ${status} ${url}`);
+      return;
+    }
+
+    if (status >= 400) {
+      publishApiFailure = `Publish API returned ${status}: ${url}`;
+      console.log(publishApiFailure);
+    }
+  };
+
+  page.on("response", responseHandler);
+
+  return {
+    dispose() {
+      page.off("response", responseHandler);
+    },
+    failure() {
+      return publishApiFailure;
+    },
+    success() {
+      return publishApiSuccess;
+    },
+  };
+}
+
 async function trySecondaryPublishConfirm(page) {
   const confirmTerms = uiLabels
     .terms("tiktokConfirm")
@@ -997,32 +1036,11 @@ async function trySecondaryPublishConfirm(page) {
   return false;
 }
 
-async function waitForPublishConfirmation(page) {
+async function waitForPublishConfirmation(page, responseTracker) {
   const startedUrl = page.url();
-  let publishApiSuccess = false;
-  let publishApiFailure = null;
-
-  const responseHandler = (response) => {
-    if (!isLikelyPublishApiResponse(response)) {
-      return;
-    }
-
-    const status = response.status();
-    const url = response.url();
-
-    if (status >= 200 && status < 300) {
-      publishApiSuccess = true;
-      console.log(`Publish API success: ${status} ${url}`);
-      return;
-    }
-
-    if (status >= 400) {
-      publishApiFailure = `Publish API returned ${status}: ${url}`;
-      console.log(publishApiFailure);
-    }
-  };
-
-  page.on("response", responseHandler);
+  const tracker = responseTracker || createPublishResponseTracker(page);
+  const ownsTracker = !responseTracker;
+  let primaryRetryCount = 0;
 
   try {
     for (let attempt = 0; attempt < 30; attempt += 1) {
@@ -1040,6 +1058,7 @@ async function waitForPublishConfirmation(page) {
         };
       }
 
+      const publishApiFailure = tracker.failure();
       if (publishApiFailure) {
         return {
           ok: false,
@@ -1047,7 +1066,7 @@ async function waitForPublishConfirmation(page) {
         };
       }
 
-      if (publishApiSuccess) {
+      if (tracker.success()) {
         return {
           ok: true,
           reason: "Publish API call succeeded.",
@@ -1062,6 +1081,20 @@ async function waitForPublishConfirmation(page) {
       }
 
       await trySecondaryPublishConfirm(page);
+
+      if (
+        primaryRetryCount < 2 &&
+        attempt > 0 &&
+        attempt % 5 === 0 &&
+        page.url().includes("/upload")
+      ) {
+        console.log("No publish confirmation yet; retrying the primary TikTok Post button.");
+        const retried = await tryClickPublishButton(page);
+        if (retried) {
+          primaryRetryCount += 1;
+          await page.waitForTimeout(1000);
+        }
+      }
 
       const urlChanged = page.url() !== startedUrl;
       if (urlChanged && !page.url().includes("/upload")) {
@@ -1079,7 +1112,9 @@ async function waitForPublishConfirmation(page) {
       reason: "No reliable publish confirmation observed within timeout.",
     };
   } finally {
-    page.off("response", responseHandler);
+    if (ownsTracker) {
+      tracker.dispose();
+    }
   }
 }
 
@@ -1167,6 +1202,7 @@ async function uploadVideo({ videoPath, caption, source, accountId }) {
   const context = await openPersistentContext(accountId);
   const page = context.pages()[0] || (await context.newPage());
   let closeHoldMs = 0;
+  let publishResponseTracker = null;
 
   try {
     await gotoUploadPage(page);
@@ -1177,8 +1213,9 @@ async function uploadVideo({ videoPath, caption, source, accountId }) {
       console.log(`Sound step failed softly: ${error.message}`);
     });
     await disableShortContentCheck(page);
+    publishResponseTracker = createPublishResponseTracker(page);
     await clickPublish(page);
-    const confirmation = await waitForPublishConfirmation(page);
+    const confirmation = await waitForPublishConfirmation(page, publishResponseTracker);
     if (!confirmation.ok) {
       throw new Error(`Publish verification failed: ${confirmation.reason}`);
     }
@@ -1206,6 +1243,9 @@ async function uploadVideo({ videoPath, caption, source, accountId }) {
       screenshotPath,
     };
   } finally {
+    if (publishResponseTracker) {
+      publishResponseTracker.dispose();
+    }
     await holdBrowserBeforeClose(page, closeHoldMs, "post-finalization");
     await context.close();
   }
