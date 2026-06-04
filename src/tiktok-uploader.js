@@ -110,25 +110,25 @@ function normalizeUiText(value) {
   return String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-function isLikelyPublishCandidateInfo(info, publishTerms = uiLabels.terms("tiktokPublish")) {
+function getPublishCandidateScore(info, publishTerms = uiLabels.terms("tiktokPublish")) {
   const text = normalizeUiText(info?.text || info?.ariaLabel);
   if (!text || info?.disabled || info?.inNavigation) {
-    return false;
+    return -1;
   }
 
   const tagName = normalizeUiText(info?.tagName);
   const role = normalizeUiText(info?.role);
   if (!["button", "a"].includes(tagName) && role !== "button") {
-    return false;
+    return -1;
   }
 
   const href = normalizeUiText(info?.href);
   if (href && /\/(post|posts|analytics|comment|home|inspiration|monetization|academy|sound|feedback)(\/|$|\?)/i.test(href)) {
-    return false;
+    return -1;
   }
 
   if (text === "posts") {
-    return false;
+    return -1;
   }
 
   const labels = publishTerms.map(normalizeUiText).filter(Boolean);
@@ -137,16 +137,48 @@ function isLikelyPublishCandidateInfo(info, publishTerms = uiLabels.terms("tikto
     .filter((label) => label !== "post")
     .some((label) => text.includes(label));
   if (!exactMatch && !nonAmbiguousMatch) {
-    return false;
+    return -1;
   }
 
   const rect = info?.rect || {};
   const viewportWidth = Number(info?.viewportWidth) || 0;
-  if (viewportWidth >= 900 && Number(rect.left) < Math.min(280, viewportWidth * 0.25)) {
-    return false;
+  const viewportHeight = Number(info?.viewportHeight) || 0;
+  const left = Number(rect.left) || 0;
+  const top = Number(rect.top) || 0;
+  const width = Number(rect.width) || 0;
+  const height = Number(rect.height) || 0;
+  const right = Number(rect.right) || left + width;
+  const mainContentBoundary = viewportWidth >= 900 ? Math.min(300, viewportWidth * 0.25) : 0;
+
+  if (viewportWidth >= 900 && right <= mainContentBoundary) {
+    return -1;
   }
 
-  return true;
+  const isBottomAction = viewportHeight > 0 && top >= viewportHeight * 0.5;
+  const isCtaSized = width >= 80 && height >= 28;
+  const className = normalizeUiText(info?.className);
+  const hasPublishCue = /\b(post|publish|submit)\b/.test(className);
+
+  if (text === "post" && viewportHeight >= 600 && !isBottomAction && !hasPublishCue) {
+    return -1;
+  }
+
+  let score = 0;
+  if (exactMatch) score += 30;
+  if (nonAmbiguousMatch) score += 20;
+  if (tagName === "button") score += 20;
+  if (normalizeUiText(info?.type) === "submit") score += 20;
+  if (hasPublishCue) score += 20;
+  if (isCtaSized) score += 15;
+  if (isBottomAction) score += 60;
+  if (viewportWidth >= 900 && left >= mainContentBoundary) score += 20;
+  score += Math.min(20, Math.max(0, top / 40));
+
+  return score;
+}
+
+function isLikelyPublishCandidateInfo(info, publishTerms = uiLabels.terms("tiktokPublish")) {
+  return getPublishCandidateScore(info, publishTerms) >= 0;
 }
 
 async function getPublishCandidateInfo(candidate) {
@@ -154,17 +186,31 @@ async function getPublishCandidateInfo(candidate) {
     const clickable = el.closest("button, [role='button'], a") || el;
     const rect = clickable.getBoundingClientRect();
     const className = (clickable.className || "").toString();
+    const dataAttributes = Array.from(clickable.attributes || [])
+      .filter((attr) => attr.name.startsWith("data-"))
+      .map((attr) => `${attr.name}=${attr.value}`)
+      .join(" ");
     const inNavigation = Boolean(
       clickable.closest(
         [
           "nav",
           "aside",
           "[role='navigation']",
+          "[role='menu']",
+          "[role='menubar']",
           "[class*='sidebar' i]",
           "[class*='side-bar' i]",
           "[class*='sidenav' i]",
           "[class*='side-nav' i]",
+          "[class*='side_nav' i]",
           "[class*='menu' i]",
+          "[class*='navigation' i]",
+          "[class*='nav-item' i]",
+          "[class*='nav_item' i]",
+          "[data-e2e*='nav' i]",
+          "[data-e2e*='side' i]",
+          "[data-testid*='nav' i]",
+          "[data-testid*='side' i]",
         ].join(", ")
       )
     );
@@ -172,18 +218,23 @@ async function getPublishCandidateInfo(candidate) {
     return {
       ariaLabel: clickable.getAttribute("aria-label") || "",
       className,
+      dataAttributes,
       disabled: Boolean(clickable.disabled) || clickable.getAttribute("aria-disabled") === "true",
       href: anchor ? anchor.getAttribute("href") || "" : "",
       inNavigation,
       rect: {
         left: rect.left,
+        right: rect.right,
         top: rect.top,
+        bottom: rect.bottom,
         width: rect.width,
         height: rect.height,
       },
       role: clickable.getAttribute("role") || "",
       tagName: clickable.tagName,
+      type: clickable.getAttribute("type") || "",
       text: clickable.textContent || "",
+      viewportHeight: window.innerHeight,
       viewportWidth: window.innerWidth,
     };
   });
@@ -195,6 +246,7 @@ async function clickFirstLikelyPublishLocator(page, locator) {
     return false;
   }
 
+  const candidates = [];
   for (let i = 0; i < total; i += 1) {
     const candidate = locator.nth(i);
     const visible = await candidate.isVisible().catch(() => false);
@@ -203,18 +255,44 @@ async function clickFirstLikelyPublishLocator(page, locator) {
     }
 
     const info = await getPublishCandidateInfo(candidate).catch(() => null);
-    if (!isLikelyPublishCandidateInfo(info)) {
+    const score = getPublishCandidateScore(info);
+    if (score < 0) {
       continue;
     }
+
+    candidates.push({ candidate, info, score });
+  }
+
+  candidates.sort((a, b) => {
+    if (b.score !== a.score) {
+      return b.score - a.score;
+    }
+    return (Number(b.info?.rect?.top) || 0) - (Number(a.info?.rect?.top) || 0);
+  });
+
+  for (const entry of candidates) {
+    const { candidate, info, score } = entry;
 
     try {
       await candidate.scrollIntoViewIfNeeded({ timeout: 3000 });
       await page.waitForTimeout(250);
       await candidate.click({ timeout: 5000 });
+      const rect = info?.rect || {};
+      console.log(
+        `Publish candidate clicked: "${normalizeUiText(info?.text || info?.ariaLabel)}" score=${score.toFixed(1)} ` +
+          `rect=${Math.round(Number(rect.left) || 0)},${Math.round(Number(rect.top) || 0)},` +
+          `${Math.round(Number(rect.width) || 0)}x${Math.round(Number(rect.height) || 0)}`
+      );
       return true;
     } catch {
       try {
         await candidate.click({ timeout: 5000, force: true });
+        const rect = info?.rect || {};
+        console.log(
+          `Publish candidate force-clicked: "${normalizeUiText(info?.text || info?.ariaLabel)}" score=${score.toFixed(1)} ` +
+            `rect=${Math.round(Number(rect.left) || 0)},${Math.round(Number(rect.top) || 0)},` +
+            `${Math.round(Number(rect.width) || 0)}x${Math.round(Number(rect.height) || 0)}`
+        );
         return true;
       } catch {
         // Continue to next candidate.
@@ -634,6 +712,11 @@ async function clickFirstVisibleButton(page, nameRegex, timeout = 3000) {
 }
 
 async function dismissInterferingOverlays(page) {
+  await page
+    .getByRole("button", { name: uiLabels.pattern("tiktokCancel") })
+    .click({ timeout: 800 })
+    .catch(() => { });
+
   // TikTok Studio sometimes opens "content checks" and other hints dialogs
   // that block the publish button; dismiss/accept them before publishing.
   const overlayActions = [
@@ -766,19 +849,42 @@ async function tryClickPublishButton(page) {
         return false;
       }
       const rect = btn.getBoundingClientRect();
-      if (window.innerWidth >= 900 && rect.left < Math.min(280, window.innerWidth * 0.25)) {
+      const mainContentBoundary = window.innerWidth >= 900 ? Math.min(300, window.innerWidth * 0.25) : 0;
+      if (window.innerWidth >= 900 && rect.right <= mainContentBoundary) {
+        return false;
+      }
+      const className = normalize(btn.className || "");
+      const hasPublishCue = /\b(post|publish|submit)\b/.test(className);
+      if (text === "post" && window.innerHeight >= 600 && rect.top < window.innerHeight * 0.5 && !hasPublishCue) {
         return false;
       }
       return true;
     };
+    const scoreCandidate = (btn) => {
+      const text = normalize(btn.textContent || btn.getAttribute("aria-label"));
+      const rect = btn.getBoundingClientRect();
+      const className = normalize(btn.className || "");
+      let score = 0;
+      if (normalizedLabels.includes(text)) score += 30;
+      if (btn.tagName.toLowerCase() === "button") score += 20;
+      if (normalize(btn.getAttribute("type")) === "submit") score += 20;
+      if (/\b(post|publish|submit)\b/.test(className)) score += 20;
+      if (rect.width >= 80 && rect.height >= 28) score += 15;
+      if (window.innerHeight > 0 && rect.top >= window.innerHeight * 0.5) score += 60;
+      if (window.innerWidth >= 900 && rect.left >= Math.min(300, window.innerWidth * 0.25)) score += 20;
+      score += Math.min(20, Math.max(0, rect.top / 40));
+      return score;
+    };
 
     const buttons = Array.from(document.querySelectorAll("button, [role='button']"));
-    for (const btn of buttons) {
-      if (isLikelyCandidate(btn)) {
-        btn.scrollIntoView({ block: "center" });
-        btn.click();
-        return true;
-      }
+    const candidates = buttons
+      .filter(isLikelyCandidate)
+      .map((btn) => ({ btn, score: scoreCandidate(btn), top: btn.getBoundingClientRect().top }))
+      .sort((a, b) => b.score - a.score || b.top - a.top);
+    if (candidates.length > 0) {
+      candidates[0].btn.scrollIntoView({ block: "center" });
+      candidates[0].btn.click();
+      return true;
     }
     return false;
   }, publishTerms);
@@ -1084,6 +1190,7 @@ module.exports = {
   closeLoginSession,
   uploadVideo,
   _private: {
+    getPublishCandidateScore,
     isLikelyPublishCandidateInfo,
   },
 };
