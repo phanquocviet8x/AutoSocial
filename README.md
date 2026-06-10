@@ -163,6 +163,7 @@ Caption sidecars can use the same base filename:
 
 ```bash
 npm run dashboard
+npm run clean:debug
 npm run doctor
 npm run check
 npm run login
@@ -176,6 +177,7 @@ npm run autodownload
 Notes:
 
 - The dashboard is the preferred workflow.
+- `clean:debug` removes local debug screenshots and dashboard logs only.
 - `login`, `post`, and `daemon` are TikTok CLI flows.
 - Instagram and YouTube posting are managed through the dashboard.
 - `uniquify` and `video-info` require FFmpeg and ffprobe.

@@ -6,6 +6,7 @@
   "main": "src/cli.js",
   "scripts": {
     "start": "node src/dashboard-server.js",
+    "clean:debug": "node scripts/clean-runtime.js",
     "check": "npm run check:syntax && npm test",
     "check:syntax": "node scripts/check-syntax.js",
     "doctor": "node scripts/doctor.js",

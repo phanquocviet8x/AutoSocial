@@ -179,6 +179,7 @@ empty to run without a logo overlay.
 
 ```bash
 npm run dashboard
+npm run clean:debug
 npm run doctor
 npm run check
 npm run login
@@ -228,6 +229,7 @@ npm run autodownload
 - `yt-dlp missing`: add `autodownload/yt-dlp.exe` or skip downloader features.
 - `No session found`: open the dashboard and log in for that platform.
 - Upload opens but does not finish: inspect `last-*.png` and dashboard logs.
+- Stale debug screenshots/logs: run `npm run clean:debug`.
 - Schedule looks saved but nothing posts after restart: start the scheduler again.
 - Dashboard refuses remote bind: use `DASHBOARD_HOST=127.0.0.1` or explicitly set `DASHBOARD_ALLOW_REMOTE=true`.
 
